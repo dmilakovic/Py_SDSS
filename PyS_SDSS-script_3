@@ -1,0 +1,295 @@
+#!/usr/bin/env python
+
+# dm: call the script "python PySDSS-script_3 --interpolate"
+
+import numpy as np
+import cPickle
+import pylab
+import matplotlib.pyplot as plt
+from SDSSmodules.SDSSfiles import *
+from SDSSmodules.SDSScorrections import *
+from SDSSmodules.SDSSclasses import *
+from SDSSmodules.SDSSutilities import trim_wavelength_arrays
+import SDSSmodules.SDSSpaths as path
+import os
+from glob import glob
+import gc
+
+def main(args):
+    # dm: select object class: "QSO" / "failedQSO"
+    # dm: this will determine where to look for data and where to save new files
+    # dm: currently, this needs to be changed by hand
+    objClass = 'QSO'
+    if '--interpolate' in args:
+        # the interpolate_flag is used in case, where we read data from pickled .dat files
+        # where in PyS_SDSS-check_correction_DR12 the interpolate_flag was used
+        # that is: instead of trimming the wavelength arrays to a certain size,
+        # we instead use the interpolation from rebin_1d (congrid, spline interpolation)
+        # to obtain arrays of the same size and properly aligned
+        interpolate_flag = True
+    else:
+        interpolate_flag = False
+
+
+    
+    # define an arbitrary flag to circumvent (hopefully) running out of RAM
+    plot_flag = True
+    
+    # define a flag to also plot the Margala et al. correction function
+    margala_flag = True
+
+    # still need to change parameters
+    fig_width_pt = 478.00812#246.0  # Get this from LaTeX using \showthe\columnwidth
+    inches_per_pt = 1.0/72.27               # Convert pt to inch
+    golden_mean = (np.sqrt(5)-1.0)/2.0         # Aesthetic ratio
+    fig_width = fig_width_pt*inches_per_pt  # width in inches
+    fig_height = fig_width*golden_mean      # height in inches
+    fig_size =  [fig_width,fig_height]
+    params = {'backend': 'ps',
+              'axes.labelsize':  10,#10,
+              'axes.titlesize':  10,
+              'text.fontsize':   10,
+              'legend.fontsize': 10,#10,
+              'xtick.labelsize': 8,#8,
+              'ytick.labelsize': 8,#8,
+              'text.usetex':     True,
+              'font.family':     'serif',
+              'font.serif':      'cm',
+              'figure.figsize': fig_size}
+    #pylab.rcParams.update(params)
+
+    if '--unpickle' not in args:
+        ##################################################
+        ######## READ DATA ###############################
+        ##################################################
+        # in this part of the script, we read the data from the pickled .dat files
+        # and then add all lists, which are part of the duplicateObjects to a
+        # list of all the data
+
+        # dm: list all .DAT files in the $path_to/save_folder/objClass/split_interval
+        data_files = glob(os.path.join(path.to_save_folder(),objClass,'split_interval','*.dat'))
+        wave_list  = []
+        flux_list  = []
+        fl_corr_list = []
+        fl_corr_std_list = []
+        fl_corr_05_list = []
+        fl_corr_32_list = []
+        fl_corr_50_list = []
+        fl_corr_68_list = []
+        fl_corr_95_list = []
+        fl_icorr_list = []
+        fl_icorr_std_list = []
+        fl_icorr_05_list = []
+        fl_icorr_32_list = []
+        fl_icorr_50_list = []
+        fl_icorr_68_list = []
+        fl_icorr_95_list = []
+        if margala_flag is True:
+            m_corr_list  = []
+            m_corr_std_list  = []
+            m_corr_05_list = []
+            m_corr_32_list = []
+            m_corr_50_list = []
+            m_corr_68_list = []
+            m_corr_95_list = []
+            m_icorr_list  = []
+            m_icorr_std_list  = []
+            m_icorr_05_list = []
+            m_icorr_32_list = []
+            m_icorr_50_list = []
+            m_icorr_68_list = []
+            m_icorr_95_list = []
+        
+        # first sort out non relevant files
+        for file in data_files:
+            if '.dat' not in file:
+                data_files.remove(file)
+        # now sort the list
+        data_files.sort(key=lambda batch: int(batch.split('_')[-1].split('.')[0]))
+        
+
+        for file in data_files:
+            if '.dat' in file:
+                datFilePath   = os.path.join(path.to_save_folder(),objClass,'split_interval', file)
+                print('Reading file %s' % datFilePath)
+                data_file     = open(datFilePath, 'r')
+                wave_list.append(cPickle.load(data_file))
+                flux_list.append(cPickle.load(data_file))
+                fl_corr_list.    append(cPickle.load(data_file))
+                fl_corr_std_list.append(cPickle.load(data_file))
+                fl_corr_05_list.append(cPickle.load(data_file))
+                fl_corr_32_list.append(cPickle.load(data_file))
+                fl_corr_50_list.append(cPickle.load(data_file))
+                fl_corr_68_list.append(cPickle.load(data_file))
+                fl_corr_95_list.append(cPickle.load(data_file))
+                if margala_flag is True:
+                    m_corr_list.    append(cPickle.load(data_file))
+                    m_corr_std_list.append(cPickle.load(data_file))
+                    m_corr_05_list. append(cPickle.load(data_file))
+                    m_corr_32_list. append(cPickle.load(data_file))
+                    m_corr_50_list. append(cPickle.load(data_file))
+                    m_corr_68_list. append(cPickle.load(data_file))
+                    m_corr_95_list. append(cPickle.load(data_file))
+                # dm: inverse correction statistics
+                fl_icorr_list.    append(cPickle.load(data_file))
+                fl_icorr_std_list.append(cPickle.load(data_file))
+                fl_icorr_05_list.append(cPickle.load(data_file))
+                fl_icorr_32_list.append(cPickle.load(data_file))
+                fl_icorr_50_list.append(cPickle.load(data_file))
+                fl_icorr_68_list.append(cPickle.load(data_file))
+                fl_icorr_95_list.append(cPickle.load(data_file))
+                if margala_flag is True:
+                    m_icorr_list.    append(cPickle.load(data_file))
+                    m_icorr_std_list.append(cPickle.load(data_file))
+                    m_icorr_05_list. append(cPickle.load(data_file))
+                    m_icorr_32_list. append(cPickle.load(data_file))
+                    m_icorr_50_list. append(cPickle.load(data_file))
+                    m_icorr_68_list. append(cPickle.load(data_file))
+                    m_icorr_95_list. append(cPickle.load(data_file))
+                data_file.close()
+
+        wave_mean        = np.hstack(wave_list)
+        flux_mean        = np.hstack(flux_list)
+        
+        fl_corr_mean     = np.hstack(fl_corr_list)
+        fl_corr_std_mean = np.hstack(fl_corr_std_list)
+        fl_corr_05       = np.hstack(fl_corr_05_list)
+        fl_corr_32       = np.hstack(fl_corr_32_list)
+        fl_corr_50       = np.hstack(fl_corr_50_list)
+        fl_corr_68       = np.hstack(fl_corr_68_list)
+        fl_corr_95       = np.hstack(fl_corr_95_list)
+        if margala_flag is True:
+            m_corr_mean     = np.hstack(m_corr_list)
+            m_corr_std_mean = np.hstack(m_corr_std_list)
+            m_corr_05       = np.hstack(m_corr_05_list)
+            m_corr_32       = np.hstack(m_corr_32_list)
+            m_corr_50       = np.hstack(m_corr_50_list)
+            m_corr_68       = np.hstack(m_corr_68_list)
+            m_corr_95       = np.hstack(m_corr_95_list)
+
+        fl_icorr_mean     = np.hstack(fl_icorr_list)
+        fl_icorr_std_mean = np.hstack(fl_icorr_std_list)
+        fl_icorr_05       = np.hstack(fl_icorr_05_list)
+        fl_icorr_32       = np.hstack(fl_icorr_32_list)
+        fl_icorr_50       = np.hstack(fl_icorr_50_list)
+        fl_icorr_68       = np.hstack(fl_icorr_68_list)
+        fl_icorr_95       = np.hstack(fl_icorr_95_list)
+        if margala_flag is True:
+            m_icorr_mean     = np.hstack(m_icorr_list)
+            m_icorr_std_mean = np.hstack(m_icorr_std_list)
+            m_icorr_05       = np.hstack(m_icorr_05_list)
+            m_icorr_32       = np.hstack(m_icorr_32_list)
+            m_icorr_50       = np.hstack(m_icorr_50_list)
+            m_icorr_68       = np.hstack(m_icorr_68_list)
+            m_icorr_95       = np.hstack(m_icorr_95_list)
+        
+        print np.shape(fl_corr_mean), np.shape(fl_corr_05)
+
+    ########################################
+    ### PLOTTING
+    ########################################
+
+    if plot_flag == True:
+        lw = 2
+        fig, axarr = plt.subplots(1, sharex=True, figsize=(12,5))
+        axarr.clear()
+        print np.shape(wave_mean), np.shape(flux_mean)
+
+        # PLOT FUNCTIONS
+        # plot Margala's median correction function
+        if margala_flag is True:
+            axarr.plot(wave_mean, m_corr_mean, color='red', label = 'Margala et al. 2015', linewidth=lw)
+            low_m_bound_std  = m_corr_mean - m_corr_std_mean
+            high_m_bound_std = m_corr_mean + m_corr_std_mean
+        lower_bound_std = fl_corr_mean - fl_corr_std_mean
+        upper_bound_std = fl_corr_mean + fl_corr_std_mean
+        print np.shape(wave_mean), np.shape(m_corr_05)
+        # plot median correction function
+        axarr.plot(wave_mean, fl_corr_mean, color='blue', label = 'This paper', linewidth=lw)
+
+        # FILL AREA 
+        if margala_flag is True:
+            #axarr.fill_between(wave_mean, low_m_bound_std, high_m_bound_std, facecolor='red', alpha=0.1, label='1 sigma range (Margala)')
+            axarr.fill_between(wave_mean, m_corr_05, m_corr_95, facecolor='red', alpha=0.2, label='central 95% range (Margala)')
+            axarr.fill_between(wave_mean, m_corr_32, m_corr_68, facecolor='red', alpha=0.3, label='central 68% range (Margala)')
+        #axarr.fill_between(wave_mean, lower_bound_std, upper_bound_std, facecolor='blue', alpha=0.5, label='1 sigma range (this paper)')
+        axarr.fill_between(wave_mean, fl_corr_05, fl_corr_95, facecolor='blue', alpha=0.2, label='Central 95% range (this paper)')
+        axarr.fill_between(wave_mean, fl_corr_32, fl_corr_68, facecolor='blue', alpha=0.3, label='Central 68% range (this paper)')
+
+
+        # AXES
+        axarr.set_xlabel(r'Observed wavelength [$\AA$]')
+        axarr.set_ylabel('Correction function')
+        #if objClass == 'failedQSO':
+        #    axarr.set_title("Sample : Failed QSO")
+        #elif objClass == 'QSO':
+        #    axarr.set_title("Sample : QSO")
+        #plt.suptitle(r'Flux correction function distribution')
+        axarr.legend(loc = 'upper left', prop={'size':12})
+        axarr.set_xlim(3500,10500)
+        plt.savefig(os.path.join('/Volumes/Transcend/Isotropy/offset/Py_SDSS/plots/','%s_flux_corr_distribution.pdf' %objClass))
+    ##################
+        # dm: INVERSE PLOT
+        fig, axarr = plt.subplots(1, sharex=True)
+        axarr.clear()
+        print np.shape(wave_mean), np.shape(flux_mean)
+
+        # PLOT FUNCTIONS
+        # plot Margala's median correction function
+        if margala_flag is True:
+            axarr.plot(wave_mean, m_corr_mean, color='red', label = 'Median correction (Margala et al. 2015)')
+        # plot median inverse correction function
+        axarr.plot(wave_mean, fl_icorr_mean, color='blue', label = 'Median correction (This paper)')
+
+        # FILL AREA 
+        if margala_flag is True:
+            #axarr.fill_between(wave_mean, low_m_bound_std, high_m_bound_std, facecolor='red', alpha=0.1, label='1 sigma range (Margala)')
+            axarr.fill_between(wave_mean, m_corr_05, m_corr_95, facecolor='red', alpha=0.2, label='central 95% range (Margala)')
+            axarr.fill_between(wave_mean, m_corr_32, m_corr_68, facecolor='red', alpha=0.3, label='central 68% range (Margala)')
+        #axarr.fill_between(wave_mean, lower_bound_std, upper_bound_std, facecolor='blue', alpha=0.5, label='1 sigma range (this paper)')
+        axarr.fill_between(wave_mean, fl_icorr_05, fl_icorr_95, facecolor='blue', alpha=0.2, label='Central 95% range (this paper)')
+        axarr.fill_between(wave_mean, fl_icorr_32, fl_icorr_68, facecolor='blue', alpha=0.3, label='Central 68% range (this paper)')
+
+
+        # AXES
+        axarr.set_xlabel(r'Wavelength [$\AA$]')
+        axarr.set_ylabel('Inverse correction function')
+        if objClass == 'failedQSO':
+            axarr.set_title("Sample : Failed QSO")
+        elif objClass == 'QSO':
+            axarr.set_title("Sample : QSO")
+        plt.suptitle(r'Inverse flux correction function distribution')
+        axarr.legend(loc = 'upper left')
+        plt.savefig(os.path.join('/Volumes/Transcend/Isotropy/offset/Py_SDSS/plots/','%s_flux_icorr_distribution.pdf' %objClass))
+    elif plot_flag is False:
+        fig_diff, ax_diff = plt.subplots(1, sharex=True)
+        ax_diff.clear()
+        ax_diff.plot(wave_short, std_short, color='blue')#, title='uncorrected std')
+        ax_diff.plot(wave_short, std_corr_short, color='red')#, title='corrected std')
+        lower_bound_std      = std_short - std_std_short
+        #print std_std_short
+        upper_bound_std      = std_short + std_std_short
+        lower_bound_corr_std = std_corr_short - std_corr_std_short
+        upper_bound_corr_std = std_corr_short + std_corr_std_short
+        ax_diff.fill_between(wave_short, lower_bound_std, upper_bound_std, facecolor='blue', alpha=0.5,
+                        label='1 sigma range')
+        ax_diff.fill_between(wave_short, lower_bound_corr_std, upper_bound_corr_std, facecolor='red', alpha=0.5,
+                        label='1 sigma range')
+        ax_diff.set_xlabel('Wavelength / $\lambda$')
+        ax_diff.set_ylabel('1 $\sigma$ of spectra distribution')
+        ax_diff.set_title ('1 $\sigma$ distribution of duplicate spectra before and after correction')
+        plt.savefig(os.path.join('/Volumes/Transcend/Isotropy/offset/Py_SDSS/plots/','%s_std_duplicate_mean.eps' %objClass))
+
+    plt.show()
+
+    #flux_corr_vstack = np.vstack([flux_corr_list[i] for i in xrange(len(flux_corr_list))])
+    #flux_corr_mean   = np.mean(flux_corr_vstack, axis=0)
+
+
+
+    #axarr.plot(
+        
+if __name__=='__main__':
+    import sys
+    main(sys.argv[1:])
+    

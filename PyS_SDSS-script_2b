@@ -1,0 +1,194 @@
+#!/usr/bin/env python
+# all this script does, is to read in all files in the
+# specListObj folder
+# and split it into chunks of wavelength ranges
+# that is done, to reduce memory footprint. 
+# Each wavelength pixel is independent of all others,
+# which means we can separate them and calculate 
+# everything individually for them
+
+# dm: call the script: " python PyS_SDSS-script_2b"
+#     no flags need to be set 
+
+import numpy as np
+import cPickle
+import pylab
+import matplotlib.pyplot as plt
+from SDSSmodules.SDSSfiles import *
+from SDSSmodules.SDSScorrections import *
+from SDSSmodules.SDSSclasses import *
+import SDSSmodules.SDSSpaths as path
+import os
+from glob import glob
+import gc
+
+class SpecListObject():
+    def __init__(self):
+        self.wave_list              = []
+        self.flux_list              = []
+        self.flux_corr_list              = []
+        #self.icorr_list             = []
+        self.margala_corr_list      = []
+        #self.margala_icorr_list     = []
+
+
+def main(args):
+    """
+    Creates .DAT files containing the statistics on the correction functions
+    """
+    # first read all files with pickled specListObj
+    # created by PyS_SDSS-check_correction_DR12
+
+    # dm: select object class: "QSO" / "failedQSO"
+    # dm: this will determine where to look for data and where to save new files
+    objClass = 'QSO'
+    # dm: list .DAT files created by script_2a in $path_to/save_folder/objClass/
+    files = glob('%s' %(os.path.join(path.to_save_folder(),objClass,'*.dat')))
+    # define the number of batches to create
+    # npix == number of pixels arrays are rebinned to
+    npix = 4000
+    # npix_interval == number of pixels in intervals we create
+    npix_interval = 100
+    
+    n_intervals = int(npix / npix_interval)
+
+    margala_flag = True
+
+    for i in xrange(n_intervals):
+        # run over all pixel intervals, read each file
+        # and dump arrays to new cPickled .dat files
+        wave_list     = []
+        flux_list     = []
+        fl_corr_list  = []
+        fl_icorr_list = []
+        m_corr_list   = []
+        m_icorr_list  = []
+
+        for file in files:
+            print file
+            # let's read each of the four arrays from each
+            # of the files individually, and add them to 
+            # a numpy array (or list??)
+            if '.dat' in file:
+                # dm: path to the .dat files created by script_2a
+                datFilePath = os.path.join(path.to_save_folder(),objClass, file)
+                pickled_data   = open(datFilePath, 'r')
+                specListObj    = cPickle.load(pickled_data)
+                interval_start = i*npix_interval
+                interval_end   = (i+1)*npix_interval
+                # if the last index is outside the boundary of the pixel arrays,
+                # it does not matter, because in the syntax
+                # [start:end] for numpy arrays, if end > size of array
+                # the last index is used instead
+                wave_interval  = np.vstack([wave[interval_start:interval_end] for wave in specListObj.wave_list])
+                flux_interval  = np.vstack([flux[interval_start:interval_end] for flux in specListObj.flux_list])
+                fl_corr_func_interval  = np.vstack([f_corr_func[interval_start:interval_end] for f_corr_func in specListObj.flux_corr_list])
+                fl_icorr_func_interval = np.vstack([1./f_corr_func[interval_start:interval_end] for f_corr_func in specListObj.flux_corr_list])
+                if margala_flag is True:
+                    m_corr_func_interval   = np.vstack([m_corr_func[interval_start:interval_end] for m_corr_func in specListObj.margala_corr_list])
+                    m_icorr_func_interval  = np.vstack([1./m_corr_func[interval_start:interval_end] for m_corr_func in specListObj.margala_corr_list])
+
+                wave_list.append(wave_interval)
+                flux_list.append(flux_interval)
+                fl_corr_list.append(fl_corr_func_interval)
+                fl_icorr_list.append(fl_icorr_func_interval)
+                if margala_flag is True:
+                    m_corr_list. append(m_corr_func_interval)
+                    m_icorr_list. append(m_icorr_func_interval)
+        
+        # the following are now numpy arrays with
+        # the pixels interval_start : interval_end of all
+        # the data created by PyS_SDSS-check_correction_DR12
+        wave_array = np.vstack(wave_list)
+        flux_array = np.vstack(flux_list)
+        fl_corr_array = np.vstack(fl_corr_list)
+        fl_icorr_array = np.vstack(fl_icorr_list)
+        if margala_flag is True:
+            m_corr_array  = np.vstack(m_corr_list)
+            m_icorr_array  = np.vstack(m_icorr_list)
+        print wave_array.nbytes
+        print np.shape(wave_array)
+        # if this works fine, we might be able to calculate mean and STD from here already
+        # now cPickle these to a file
+        # try to calculate mean of wave, flux
+        # and std of correction functions
+        wave_mean    = np.mean(wave_array, axis=0)
+        flux_mean    = np.median(flux_array, axis=0)
+        fl_corr_mean = np.median(fl_corr_array, axis=0)
+        fl_corr_std  = np.nanstd(fl_corr_array, axis=0)
+        fl_corr_05   = np.percentile(fl_corr_array,  5, axis = 0)
+        fl_corr_32   = np.percentile(fl_corr_array,  32, axis = 0)
+        fl_corr_50   = np.percentile(fl_corr_array,  50, axis = 0)
+        fl_corr_68   = np.percentile(fl_corr_array,  68, axis = 0)
+        fl_corr_95   = np.percentile(fl_corr_array,  95, axis = 0)
+        if margala_flag is True:
+            m_corr_mean  = np.mean(m_corr_array, axis=0)
+            m_corr_std   = np.nanstd(m_corr_array, axis=0)
+            m_corr_05    = np.percentile(m_corr_array,  5, axis = 0)
+            m_corr_32    = np.percentile(m_corr_array,  32, axis = 0)
+            m_corr_50    = np.percentile(m_corr_array,  50, axis = 0)
+            m_corr_68    = np.percentile(m_corr_array,  68, axis = 0)
+            m_corr_95    = np.percentile(m_corr_array,  95, axis = 0)
+
+        # dm: inverse correction function statistics
+        fl_icorr_mean = np.median(fl_icorr_array, axis=0)
+        fl_icorr_std  = np.nanstd(fl_icorr_array, axis=0)
+        fl_icorr_05   = np.percentile(fl_icorr_array,  5, axis = 0)
+        fl_icorr_32   = np.percentile(fl_icorr_array,  32, axis = 0)
+        fl_icorr_50   = np.percentile(fl_icorr_array,  50, axis = 0)
+        fl_icorr_68   = np.percentile(fl_icorr_array,  68, axis = 0)
+        fl_icorr_95   = np.percentile(fl_icorr_array,  95, axis = 0)
+        if margala_flag is True:
+            m_icorr_mean  = np.mean(m_icorr_array, axis=0)
+            m_icorr_std   = np.nanstd(m_icorr_array, axis=0)
+            m_icorr_05    = np.percentile(m_icorr_array,  5, axis = 0)
+            m_icorr_32    = np.percentile(m_icorr_array,  32, axis = 0)
+            m_icorr_50    = np.percentile(m_icorr_array,  50, axis = 0)
+            m_icorr_68    = np.percentile(m_icorr_array,  68, axis = 0)
+            m_icorr_95    = np.percentile(m_icorr_array,  95, axis = 0)
+        filename = 'split_interval_%i.dat' % interval_start
+        # dm: output path for files created by this script
+        splitIntervalFilePath = os.path.join(path.to_save_folder(),objClass,'split_interval', filename)
+        save_interval = open(splitIntervalFilePath, 'wb')
+        cPickle.dump(wave_mean, save_interval, -1)
+        cPickle.dump(flux_mean, save_interval, -1)
+        cPickle.dump(fl_corr_mean, save_interval, -1)
+        cPickle.dump(fl_corr_std,  save_interval, -1)
+        cPickle.dump(fl_corr_05,  save_interval, -1)
+        cPickle.dump(fl_corr_32,  save_interval, -1)
+        cPickle.dump(fl_corr_50,  save_interval, -1)
+        cPickle.dump(fl_corr_68,  save_interval, -1)
+        cPickle.dump(fl_corr_95,  save_interval, -1)
+        if margala_flag is True:
+            cPickle.dump(m_corr_mean,  save_interval, -1)
+            cPickle.dump(m_corr_std,   save_interval, -1)
+            cPickle.dump(m_corr_05,   save_interval, -1)
+            cPickle.dump(m_corr_32,   save_interval, -1)
+            cPickle.dump(m_corr_50,   save_interval, -1)
+            cPickle.dump(m_corr_68,   save_interval, -1)
+            cPickle.dump(m_corr_95,   save_interval, -1)
+
+        # dm: add inverse correction statistics to the pickled files
+        cPickle.dump(fl_icorr_mean, save_interval, -1)
+        cPickle.dump(fl_icorr_std,  save_interval, -1)
+        cPickle.dump(fl_icorr_05,  save_interval, -1)
+        cPickle.dump(fl_icorr_32,  save_interval, -1)
+        cPickle.dump(fl_icorr_50,  save_interval, -1)
+        cPickle.dump(fl_icorr_68,  save_interval, -1)
+        cPickle.dump(fl_icorr_95,  save_interval, -1)
+        if margala_flag is True:
+            cPickle.dump(m_icorr_mean,  save_interval, -1)
+            cPickle.dump(m_icorr_std,   save_interval, -1)
+            cPickle.dump(m_icorr_05,   save_interval, -1)
+            cPickle.dump(m_icorr_32,   save_interval, -1)
+            cPickle.dump(m_icorr_50,   save_interval, -1)
+            cPickle.dump(m_icorr_68,   save_interval, -1)
+            cPickle.dump(m_icorr_95,   save_interval, -1)
+        save_interval.close()
+        
+
+
+
+if __name__=='__main__':
+    import sys
+    main(sys.argv[1:])

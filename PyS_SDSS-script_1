@@ -1,0 +1,244 @@
+#!/usr/bin/env python
+# This script creates FITS files from DR12 data
+# which contains weather data (individual exposures)
+# and calculates the correction function for every single file
+# using the 2D or 1D gaussian integral written ctypes
+# As an INPUT you only give a list of files with weather data
+
+# dm: python PyS_SDSS-script_1 $path/to/the/spectra
+#     script reads FITS files from $path/to/the/spectra
+#     and caluclates the correction function
+#     new FITS files are created at $path.to_script1_output
+#     (see SDSSmodules.SDSSpaths)
+
+
+from SDSSmodules.SDSSfiles import *
+from SDSSmodules.SDSSfitting import *
+from SDSSmodules.SDSScorrections import *
+from SDSSmodules.SDSSoutput import *
+from SDSSmodules.SDSScspec import *
+from SDSSmodules.SDSSutilities import *
+from SDSSmodules.SDSSclasses import *
+import SDSSmodules.SDSSpaths as path
+
+import numpy as np
+import math
+import os
+import fitsio
+import glob
+import sys
+import argparse
+
+# # the multiprocessing module
+import multiprocessing as mp
+
+
+def create_spec_flux_corr_file(file, spec):
+
+    # output filepath
+    filename = os.path.basename(file)
+    filepath = os.path.join(path.to_script1_output(),filename)
+
+    print 'FILEPATH = ',filepath
+
+    hdu = fitsio.FITS(filepath, 'rw')
+    
+    array_list = [spec.wave, spec.flux, spec.flux_error, spec.flux_corr, spec.flux_icorr]
+    names = ['wave', 'flux', 'Eflux', 'corr', 'icorr']
+    hdu.write(array_list, names=names)
+
+    hdu0 = hdu[1]
+    hdu0.write_key('Az', spec.az, comment='Azimuth of telescope during observation')
+    hdu0.write_key('Alt', spec.alt, comment='Altitude of telescope during observation')
+    if spec.temp_flag == 0:
+        hdu0.write_key('T', spec.T, comment='mean temperature during observation, C')
+    hdu0.write_key('P', spec.P, comment='mean pressure during observation, hPa')
+    hdu0.write_key('Ppw', spec.ppW, comment='mean partial water pressure during observation, hPa')
+    hdu0.write_key('h', spec.h, 'mean humidity during observation, ')
+    hdu0.write_key('RefLam', 4000, comment='reference wavelength of correction in Angstrom') 
+    hdu0.write_key('TFlag', spec.temp_flag, comment='flag if temp was NaN. 1 = true, 0 = false') 
+    
+    hdu.close()
+
+
+def file_loop(files, settings, resid_corr, chunksize, start_iter, end_iter):
+
+    #spectra = [spectrum() for i in xrange(chunksize)]
+
+    print 'START = {0:>6d} END = {1:>6d}'.format(start_iter, end_iter)
+    #for i in xrange(start_iter, end_iter):
+    counter = 0
+    for i, file in enumerate(files[start_iter:end_iter]):
+        spec = spectrum()
+        if i % 500 == 0:
+            print i, 'spectra finished'
+            pass
+        # READ FITS FILE, RETURN SPECTRUM OBJECT
+        try:
+            spec.__read_BOSS__(file)
+        except IOError:
+            bad_fits_dr12 = open(os.path.join(path.to_save_folder(),'bad_fits_dr12.txt'), 'a')
+            bad_fits_dr12.write(file+'\n')
+            bad_fits_dr12.close()
+            del(spec)
+            continue
+        except ValueError:
+            bad_fits_dr12 = open(os.path.join(path.to_save_folder(),'bad_fits_dr12.txt'), 'a')
+            bad_fits_dr12.write(file+'\n')
+            bad_fits_dr12.close()
+            del(spec)
+            continue
+        # USE ONLY 4000A EFFECTIVE WAVELENGTH SPECTRA
+        if spec.lambda_eff == 5400.0:
+            print i, file, 'has effective wavelength 5400A, skipping!'
+            continue
+        elif spec.lambda_eff == 4000.0:
+            pass
+
+        # PERFORM FLUX CORRECTIONS          
+        try:
+            flux_corr      = perform_flux_correction_adaptive(spec, settings, resid_corr)
+        except ValueError:
+            no_weather_dr12 = open(os.path.join(path.to_save_folder(),'no_weather_dr12.txt'), 'a')
+            no_weather_dr12.write(file+'\n')
+            no_weather_dr12.close()
+            continue
+        if flux_corr is not False and flux_corr is not True:
+            corr_4000       = flux_corr[0]
+            corr_5400       = flux_corr[1]
+            spec.corr4000   = corr_4000
+            spec.corr5400   = corr_5400
+            spec.corr       = corr_5400 / corr_4000
+            spec.icorr      = corr_4000 / corr_5400
+            spec.flux_corr  = spec.flux * spec.corr
+            
+            #save_spectrum(file, spec)
+            #print path.to_script1_output()
+            spec.__save_fitsio__(dirpath = settings.outdir, filetype='corr')
+            print 'SAVED {name}'.format(name=spec.basename)
+            if spec.airtemp == 17.5:
+                counter += 1
+        elif flux_corr is True:
+            bad_fits_dr12 = open(os.path.join(path.to_save_folder(),'QSO','bad_fits_dr12.txt'), 'a')
+            bad_fits_dr12.write(file+'\n')
+            bad_fits_dr12.close()
+        else:
+            no_weather_dr12 = open(os.path.join(path.to_save_folder(),'QSO','no_weather_dr12.txt'), 'a')
+            no_weather_dr12.write(file+'\n')
+            no_weather_dr12.close()
+        del(spec)
+
+    #print 'There are {0:6d} spectra with no air temperature data.'.format(counter)
+
+def main(args):
+    # sample
+    sample = args.data[0]
+    # path to the folder with the new FITS files
+    if sample == 'QSO':
+        dirname = path.to_DR12_QSO()
+        if args.nobalmer == False:
+            outdir  = path.to_DR12_QSO_corrected()
+        if args.nobalmer == True:
+            outdir  = path.to_DR12_QSO_nobalmer()
+    elif sample == 'FQSO':
+        dirname = path.to_DR12_failedQSO()
+        if args.nobalmer == False:
+            outdir  = path.to_DR12_failedQSO_corrected()
+        if args.nobalmer == True:
+            outdir  = path.to_DR12_failedQSO_nobalmer()
+    # return all files that are in the target folder
+    if args.spec_dir:
+        files = glob.glob(os.path.join(args.spec_dir,'*.fits'))
+    if args.spec_file:
+        files = []
+        with open(args.spec_file, 'r') as filelist:
+            for line in filelist:
+                files.append(line)
+    n_files = np.size(files)
+    
+    
+    print 'Spectra in specified directory/list: {0:>9d}'.format(n_files)
+
+    # return objects that were already corrected
+    files_already_corrected = glob.glob(os.path.join(outdir,'*.fits'))
+    n_files_corrected = np.size(files_already_corrected)
+    #print 'Already corrected: {0:>9d}'.format(n_files_corrected)
+
+    # remove all files which have no weather data
+    no_weather = open(os.path.join(path.to_save_folder(),sample,'no_weather_dr12.txt')).readlines()
+    n_no_weather = np.size(no_weather)
+    #print 'Files with no weather data: {0:>9d}'.format(n_no_weather)
+    # strip the filepath just to basename
+    for i, file in enumerate(files):
+        files[i] = os.path.basename(file).rstrip('\n')
+    for i, file in enumerate(no_weather):
+        no_weather[i] = file.rstrip().split('/')[-1]
+    for i, file in enumerate(files_already_corrected):
+        files_already_corrected[i] = os.path.basename(file)[4:]
+    files = np.setdiff1d(files, no_weather)
+
+    # removing those without weather data, we are left with
+    n_to_correct_w_weather = np.size(files)
+    #print('Files with weather data to work on' % n_to_correct_w_weather)
+
+    #before we can take the difference, we need to get rid of \n at end of each element
+    for i, file in enumerate(files):
+        files[i] = os.path.basename(file).strip('\n')
+    
+    # difference of sets
+    files = np.setdiff1d(files, files_already_corrected)
+    if len(files) == 0:
+        sys.exit('{0:=^80}'.format(' All files provided have already been corrected. Exiting. '))
+    n_files_now = np.size(files)
+    print 'Spectra to work on: {0:>9d}'.format(n_files_now)
+
+    # revert filenames to full path
+    files_now = []
+    for basename in files:
+        files_now.append(os.path.join(dirname, basename))
+
+    files = files_now
+
+    settings = program_settings()
+    settings.outdir = outdir
+    if args.nobalmer == False:
+        resid_corr = read_resid_corr(path.to_resid_corr())
+    elif args.nobalmer == True:
+        resid_corr = None
+
+    procs = []
+    nspec = len(files)
+    # select the number of processors to use (nprocs)
+    settings.nprocs = 4
+    # Calculate the number of files each process has to work on
+    chunksize = int(math.ceil(nspec / float(settings.nprocs)))
+    #print nspec, chunksize
+
+    for i in xrange(settings.nprocs):
+        # create a new process
+        #print 'start process', i
+        p = mp.Process(target=file_loop, 
+                       args=(files, settings, resid_corr, chunksize, chunksize*i, chunksize*(i+1)))
+        # add it to the list of processes
+        procs.append(p)
+        # start the process
+        p.start()
+
+    for p in procs:
+        p.join()
+
+
+    
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--spec-dir', type=str, default=None,
+        help='path to directory containing individual spec files')
+    parser.add_argument('--spec-file', type=str, default=None,
+        help='TXT file with the spectra to correct')
+    parser.add_argument('--data', choices=['QSO','FQSO','STAR'], nargs=1, type=str, default=None,
+        help='data to use')
+    parser.add_argument('--nobalmer', action='store_true', default=False,
+        help='show the figure instead of saving it')
+    args = parser.parse_args()
+    main(args)
