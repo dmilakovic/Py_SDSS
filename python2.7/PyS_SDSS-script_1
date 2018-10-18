@@ -37,9 +37,9 @@ def create_spec_flux_corr_file(file, spec):
 
     # output filepath
     filename = os.path.basename(file)
-    filepath = os.path.join(path.to_script1_output(),filename)
+    filepath = os.path.join(path.to_script1_output,filename)
 
-    print 'FILEPATH = ',filepath
+    print('FILEPATH = ',filepath)
 
     hdu = fitsio.FITS(filepath, 'rw')
     
@@ -65,25 +65,25 @@ def file_loop(files, settings, resid_corr, chunksize, start_iter, end_iter):
 
     #spectra = [spectrum() for i in xrange(chunksize)]
 
-    print 'START = {0:>6d} END = {1:>6d}'.format(start_iter, end_iter)
+    print('START = {0:>6d} END = {1:>6d}'.format(start_iter, end_iter))
     #for i in xrange(start_iter, end_iter):
     counter = 0
     for i, file in enumerate(files[start_iter:end_iter]):
         spec = spectrum()
         if i % 500 == 0:
-            print i, 'spectra finished'
+            print(i, 'spectra finished')
             pass
         # READ FITS FILE, RETURN SPECTRUM OBJECT
         try:
             spec.__read_BOSS__(file)
         except IOError:
-            bad_fits_dr12 = open(os.path.join(path.to_save_folder(),'bad_fits_dr12.txt'), 'a')
+            bad_fits_dr12 = open(os.path.join(path.to_save_folder,'bad_fits_dr12.txt'), 'a')
             bad_fits_dr12.write(file+'\n')
             bad_fits_dr12.close()
             del(spec)
             continue
         except ValueError:
-            bad_fits_dr12 = open(os.path.join(path.to_save_folder(),'bad_fits_dr12.txt'), 'a')
+            bad_fits_dr12 = open(os.path.join(path.to_save_folder,'bad_fits_dr12.txt'), 'a')
             bad_fits_dr12.write(file+'\n')
             bad_fits_dr12.close()
             del(spec)
@@ -99,7 +99,7 @@ def file_loop(files, settings, resid_corr, chunksize, start_iter, end_iter):
         try:
             flux_corr      = perform_flux_correction_adaptive(spec, settings, resid_corr)
         except ValueError:
-            no_weather_dr12 = open(os.path.join(path.to_save_folder(),'no_weather_dr12.txt'), 'a')
+            no_weather_dr12 = open(os.path.join(path.to_save_folder,'no_weather_dr12.txt'), 'a')
             no_weather_dr12.write(file+'\n')
             no_weather_dr12.close()
             continue
@@ -119,11 +119,11 @@ def file_loop(files, settings, resid_corr, chunksize, start_iter, end_iter):
             if spec.airtemp == 17.5:
                 counter += 1
         elif flux_corr is True:
-            bad_fits_dr12 = open(os.path.join(path.to_save_folder(),'QSO','bad_fits_dr12.txt'), 'a')
+            bad_fits_dr12 = open(os.path.join(path.to_save_folder,'QSO','bad_fits_dr12.txt'), 'a')
             bad_fits_dr12.write(file+'\n')
             bad_fits_dr12.close()
         else:
-            no_weather_dr12 = open(os.path.join(path.to_save_folder(),'QSO','no_weather_dr12.txt'), 'a')
+            no_weather_dr12 = open(os.path.join(path.to_save_folder,'QSO','no_weather_dr12.txt'), 'a')
             no_weather_dr12.write(file+'\n')
             no_weather_dr12.close()
         del(spec)
@@ -135,17 +135,17 @@ def main(args):
     sample = args.data[0]
     # path to the folder with the new FITS files
     if sample == 'QSO':
-        dirname = path.to_DR12_QSO()
+        dirname = path.to_DR12_QSO
         if args.nobalmer == False:
-            outdir  = path.to_DR12_QSO_corrected()
+            outdir  = path.to_DR12_QSO_corrected
         if args.nobalmer == True:
-            outdir  = path.to_DR12_QSO_nobalmer()
+            outdir  = path.to_DR12_QSO_nobalmer
     elif sample == 'FQSO':
-        dirname = path.to_DR12_failedQSO()
+        dirname = path.to_DR12_failedQSO
         if args.nobalmer == False:
-            outdir  = path.to_DR12_failedQSO_corrected()
+            outdir  = path.to_DR12_failedQSO_corrected
         if args.nobalmer == True:
-            outdir  = path.to_DR12_failedQSO_nobalmer()
+            outdir  = path.to_DR12_failedQSO_nobalmer
     # return all files that are in the target folder
     if args.spec_dir:
         files = glob.glob(os.path.join(args.spec_dir,'*.fits'))
@@ -165,7 +165,7 @@ def main(args):
     #print 'Already corrected: {0:>9d}'.format(n_files_corrected)
 
     # remove all files which have no weather data
-    no_weather = open(os.path.join(path.to_save_folder(),sample,'no_weather_dr12.txt')).readlines()
+    no_weather = open(os.path.join(path.to_save_folder,sample,'no_weather_dr12.txt')).readlines()
     n_no_weather = np.size(no_weather)
     #print 'Files with no weather data: {0:>9d}'.format(n_no_weather)
     # strip the filepath just to basename
@@ -202,7 +202,7 @@ def main(args):
     settings = program_settings()
     settings.outdir = outdir
     if args.nobalmer == False:
-        resid_corr = read_resid_corr(path.to_resid_corr())
+        resid_corr = read_resid_corr(path.to_resid_corr)
     elif args.nobalmer == True:
         resid_corr = None
 

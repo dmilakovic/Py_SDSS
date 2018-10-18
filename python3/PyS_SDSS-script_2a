@@ -1,0 +1,438 @@
+#!/usr/bin/env python
+# This function takes a dataset of DR12 spectra as input.
+# It reads the wavelength arrays, flux arrays, flux correction function arrays 
+# (if already calculated from small FITS files created by create_small_spec_flux_corr()
+# function, otherwise it can calculate it, if wanted)
+# as well es Margala et al. correction function
+# and dumps these arrays into cPickled .dat files to work on later
+# Before doing that all arrays are rebinned to the same size (4000 pixels default)
+# However, since the datasets are huge, we do this in batches of 10000 files (default)
+# and these batches are distributed over n processes
+
+
+# dm: python PyS_SDSS-script2a --nocorr
+
+import numpy as np
+import multiprocessing as mp
+import fitsio
+from SDSSmodules.SDSSfiles import *
+from SDSSmodules.SDSScorrections import *
+from SDSSmodules.SDSSclasses import *
+from SDSSmodules.SDSSutilities import find_element_larger_in_arrays, trim_wavelength_arrays
+import SDSSmodules.SDSSpaths as path
+import cPickle
+import timeit
+from guppy import hpy
+import gc
+import os
+import h5py
+from scipy.interpolate import interp1d
+from time import time
+from termcolor import colored
+from glob import glob
+
+
+class SpecListObject():
+    def __init__(self):
+        self.wave_list              = []
+        self.flux_list              = []
+        self.corr_list              = []
+        self.icorr_list             = []
+        self.margala_corr_list      = []
+        self.margala_icorr_list     = []
+
+
+def calc_RMS(arr):
+    # calculate the RMS of an array
+    N = float(np.size(arr))
+    if N == 0:
+        return np.inf
+    #arr2 = arr**2
+    #sumarr = np.sum(arr2)
+    val = np.sqrt(1/N*(np.sum(arr**2)))
+    return val
+
+def get_time():
+    """
+    Returns the work time in hours, minutes, seconds
+
+    Outputs:
+    --------
+           h : hour
+           m : minute
+           s : second
+    """
+    endTime = time()			
+    workTime =  endTime - startTime								
+    m,s = divmod(workTime, 60)
+    h,m = divmod(m, 60)
+    h,m,s = [int(value) for value in (h,m,s)]
+    return h,m,s
+
+def spec_loop(files, 
+                   settings, 
+                   resid_corr, 
+                   chunksize, 
+                   start_iter, 
+                   end_iter,
+                   iter_batch,
+                   interpolate_flag = True,
+                   wave_low  = 3800,
+                   wave_high = 10000,
+                   npix      = 4000):
+    # files:      list, contains filenames of spectra
+    # settings:   settings object, defined in SDSSmodules
+    # resid_corr: array storing the residual correction for the 'balmer problem'
+    # chunksize:  number of spectra to work on for this subprocess
+    # start_iter: iterator index where to start in duplicates (dm: NOT USING DUPLICATES ANYMORE)
+    # end_iter:   see start_iter
+    # iter_batch: number of batch currently being worked on. Only relevant for
+    #             naming scheme of cPickled files
+    # settings.perform_corr: flag, which checks whether we perform the flux correction or simply
+    # read the corrections from the files in folder:
+
+    objClass = 'QSO'
+    # dm: initialise the object
+    specListObj = SpecListObject()
+    # dm: flag = 1 if file can not be read by fitsio, 0 otherwise
+    flag   = 0
+
+    # dm: initialise guppy to track down memory usage
+    h = hpy()
+    h.setref()
+
+    # dm: margala_flat = True if using Margala's corrections, False otherwise
+    margala_flag = True
+    if margala_flag is True:
+        # dm: open the HDF5 file with the corrections
+        tpcorr = h5py.File(path.to_Margala_corrections(), 'r')
+        tpcorr_wave = tpcorr['wave'].value
+
+    # dm: files divided in batches, start_iter & end_iter denote the first and last index in a batch
+    for i in xrange(start_iter, end_iter):
+        # dm: report upon completion of every 5000 spectra
+        if i % 5000 == 0:
+            hour,minute,second = get_time()
+            print colored('{0:6d} spectra finished, time elapsed: {1:3d}h:{2:02d}m:{3:02d}s'.format(i, hour, minute, second), attrs=['bold'])
+
+        # dm: initialise spectrum file
+        spec = spectrum()
+        # read the FITS file of the spectrum, as well as 
+        # the flux corrected file and Margala et al. correction
+        # dm: find and open the __UNCORRECTED__ FITS file
+        try:
+            # files does not contain the full path yet:
+            filepath = os.path.join(path.to_DR12(),objClass,files[i])
+            read_spec_fitsio(filepath, spec, None)
+        except IOError:
+            flag = 1
+            break
+
+        # dm: if perform_corr = 1, calculate correction function; otherwise read it from file
+        settings.perform_corr = 0
+        if settings.perform_corr == 1:
+            try:
+                corr_4000, corr_5400 = perform_flux_correction_adaptive(spec, settings, resid_corr, seeing='seeing50', check_weather=1)
+            except ValueError:
+                flag = 1
+                break
+            # take out flux_base from correction, still being saved in FITS files
+            spec.corr   = spec.flux * corr_5400 / corr_4000
+            # Write fits files containing the flux corrections
+            create_spec_flux_corr_file(files[i], spec)
+        elif settings.perform_corr == 0:
+            # dm: file_path is the path to the fits files created by 'PyS_SDSS-script1'
+            # dm: TO DO: make this an input variable!
+            filepath = os.path.join(path.to_DR12_QSO_corrected(), files[i])
+            try:
+                # dm: open FITS file
+                hdu                    = fitsio.FITS(filepath)
+                # spec.corr is the flux correction function, not the corrected flux!
+                spec.corr   = hdu[1]['corr'][:]
+                hdu.close()
+                # dm: read Margala et al. flux correction from the hp5 file
+                if margala_flag is True:
+                    # dm: construct the key
+                    plate   = spec.plateid
+                    mjd     = spec.MJD
+                    fiberid = spec.fiberid
+                    tpcorr_key = '%s/%s/%s' % (plate, mjd, fiberid)
+                    try:
+                        correction             = tpcorr[tpcorr_key].value
+                        correction_interp      = interp1d(tpcorr_wave, correction, kind='linear')
+                        margala_corr_func      = correction_interp(spec.wave)
+                        spec.margala_corr_func = margala_corr_func
+                    except KeyError:
+                        no_margala_corr_files = open('no_margala_corr_files.txt', 'a')
+                        print('The file with plate-mjd-fiber %i %i %i cannot be found in Margala et al. catalog' % (plate, mjd, fiberid))
+                        no_margala_corr_files.write('%s %s %s' % (plate, mjd, fiberid))
+                        no_margala_corr_files.close()
+                        flag = 1
+            except IOError:
+                # set flag to 1, so that we skip this duplicate
+                print 'IOError happens???'
+                flag = 1
+            except ValueError:
+                print 'ValueError occured. Skip file'
+                # set flag to 1, so that we skip this duplicate
+                flag = 1
+
+
+        if flag == 1:
+            #print 'Flag was set somewhere. That means we skip the current spectrum'
+            continue
+
+        if interpolate_flag is True:
+            # in this case interpolate flag is true means:
+            # we don't trim wavelength arrays, but rather all interpolate
+            # the flux and flux_corr arrays within a specific wavelength range [wave_low, wave_high]
+            # to a specific number of pixels npix
+            continue_flag = False
+            wave          = spec.wave
+            try:
+                f_corr = spec.corr
+                if margala_flag is True:
+                    m_corr = spec.margala_corr_func
+                    assert np.size(m_corr) is not 0
+                assert np.size(f_corr) is not 0
+            except ValueError:
+                print np.size(spec.corr), spec.corr
+                print('The array flux corr does not seem to exist for file %s' % files[i])
+                continue_flag = True
+                continue
+            except AssertionError:
+                print np.size(spec.corr), spec.corr
+                print('The array flux corr does not seem to exist for file %s' % files[i])
+                continue_flag = True
+                continue
+            if np.min(wave) > wave_low or np.max(wave) < wave_high:
+                print('The wavelength array of %s is inside the wave_low and wave_high boundaries' % files[i])
+                #print 'wave_low  = ', wave_low
+                #print 'wave_high = ', wave_high
+                #print 'wave min and max:', np.min(wave), np.max(wave)
+                #print 'file: ', files[i]
+                print 'Skip this file and continue'
+                continue_flag = True
+
+            index = np.where( (wave > wave_low ) &
+                              (wave < wave_high) &
+                              (np.isfinite(spec.flux) == True) &
+                              (np.isfinite(f_corr) == True))[0]
+            # the last line should hopefully be redundant!
+            # now we have the indices of all elements in the wavelength (and thus flux, corr)
+            # arrays, which we will now interpolate
+            fl     = spec.flux[index]
+            f_corr = f_corr[index]
+            if margala_flag is True:
+                m_corr = m_corr[index]
+                m_corr = rebin_1d(m_corr, npix, method='spline')
+            fl     = rebin_1d(fl,   npix, method='spline')
+            wave   = rebin_1d(wave, npix, method='spline')
+            f_corr = rebin_1d(f_corr, npix, method='spline')
+            spec.flux = fl
+            spec.wave = wave
+            spec.flux_corr_func = f_corr
+            if margala_flag is True:
+                spec.margala_corr_func = m_corr
+                #spec.margala_corr = fl * m_corr
+            #spec.flux_corr      = fl * f_corr
+            # margala_corr and flux_corr not used in the current script
+            if continue_flag is True:
+                #print 'Continue flag is true. This means we skip this iteration of the for loop.'
+                #print 'Equivalent to skipping the whole duplicate object'
+                continue
+
+        ##############################
+        # HOPEFULLY all arrays are of the correct size now!!!
+        ##############################
+
+        ##################################################
+        ######### Now we're done with reading data and interpolation
+        ######### we now simply add each array to the specListObj 
+        ######### and dump it to a .dat file
+        ##################################################
+        
+        specListObj.wave_list.append(spec.wave)
+        specListObj.flux_list.append(spec.flux)
+        specListObj.corr_list.append(spec.flux_corr_func)
+        specListObj.icorr_list.append(1./spec.flux_corr_func)
+        if margala_flag is True:
+            specListObj.margala_corr_list.append(spec.margala_corr_func)
+            specListObj.margala_icorr_list.append(1./spec.margala_corr_func)
+        del(spec)
+
+
+    n_files_skipped = np.size(files) - np.size(specListObj.wave_list)
+    print('Subprocess %s has finished. %i files were skipped' % (os.getpid(), n_files_skipped))
+
+    # dm: program saves data into .dat files (in batches). save_file_name is the path to those files
+    save_file_name = os.path.join(path.to_save_folder(),objClass,'saved_specObjList_%s_batch_%s.dat' % (str(start_iter), str(iter_batch)))
+    save_file = open(save_file_name, 'wb')
+    print 'save Object to', save_file_name
+
+    cPickle.dump(specListObj, save_file, -1)
+    save_file.close()
+    # if margala_flag is True, also close the HDF5 file from Margala again
+    if margala_flag is True:
+        tpcorr.close()
+        del(specListObj.margala_corr_list)
+    del(specListObj.wave_list)
+    del(specListObj.flux_corr_list)
+    del(specListObj.flux_list)
+
+
+
+def main(args):
+    # dm: set object class
+    objClass = 'QSO'
+    # start timer
+    # dm: initialise time counter, take note of start time
+    global startTime
+    startTime = time()
+    start_time = timeit.default_timer()
+
+    # dm: initilise guppy to monitor memory usage
+    h = hpy()
+
+    # dm: ignore all numpy floating-point errors (!)
+    np.seterr(all='ignore')
+
+    # dm: initialise program settings
+    # create settings object and add perform_corr attribute; default to 1
+    settings = program_settings()
+    settings.perform_corr = 0
+    settings.nprocs = 4
+
+    # dm: check for flags in arguments provided
+    if '--nocorr' in args:
+        i = args.index('--nocorr')
+        settings.perform_corr = 0
+        print '--nocorr option set. Flux correction will be read from file'
+    if '--nprocs' in args:
+        i = args.index('--nprocs')
+        try:
+            settings.nprocs = int(args[i+1])
+        except IndexError:
+            print 'Error: If you supply --nprocs flag, you need to give a number of'
+            print 'processes to be used!'
+            import sys
+            sys.exit()
+    if '--unpickle' in args:
+        # if the --unpickle option is set, we will read the 
+        # data from pickled files created by the
+        # read_arrays_and_interpolate function 
+        print 'By providing the --unpickle option, please provide the path to the folder, in which'
+        print 'the pickled data files lie'        
+        unpickle_flag == True
+        i = args.index('--unpickle')
+        try:
+            unpickle_data_path = args[i+1]
+        except IndexError:
+            print 'Error: If you provide the --unpickle option, you have to give a path to the folder'
+            print 'which contains the data files'
+
+    # dm: read corrections to the Balmer problem (see Lee et al. 2013)
+    resid_corr = read_resid_corr(path.to_resid_corr())
+    np.seterr(divide='ignore')
+
+    # dm: path to the fits files created by 'PyS_SDSS-script1' script
+    flux_calib_files = glob(os.path.join(path.to_DR12(),objClass+'_PySDSS','*.fits'))
+    for i, spec in enumerate(flux_calib_files):
+        flux_calib_files[i] = os.path.basename(flux_calib_files[i])
+    
+    # folder of all DR12 files including weather data
+    # weather data is not explicitly used, if the --nocorr option is used
+    # however, then there should be a corresponding file in flux_calib_files, which has
+    # the flux correction function stored!
+
+    # dm: path to the __UNCORRECTED__ SDSS FITS files
+    # dm: TO DO: make this a variable!
+    spec_files_all    = glob(os.path.join(path.to_DR12(),objClass,'*.fits'))
+
+    # dm: strip filenames to basename
+    for i,spec in enumerate(spec_files_all):
+        spec_files_all[i] = os.path.basename(spec_files_all[i])
+
+    ########################################
+
+    procs = []
+    nspec = len(flux_calib_files)
+    
+    # basically from here on what we do: check which file 
+    # which is in flux_calib_files is also in spec_files_all
+    print('There are %i files for which flux corrected files exist' % np.size(flux_calib_files))
+    print('There are %i downloaded files' % np.size(spec_files_all))
+    files_all = np.intersect1d(spec_files_all, flux_calib_files)
+    print('There are %i files with the original FITS file and the corrected one' % np.size(files_all))
+
+    ##################################################
+    ###### We wish to calculate everyting in batches
+    ###### of a few thousand duplicates
+    ##################################################
+
+    # dm: TO DO: PROGRAM LEAVES OUT PART OF THE SPECTRA ( files_all == nbatches*10000 + __REMAINDER__ )
+    batch_size = 10000
+    nbatches = int(np.floor(len(files_all) / float(batch_size)))
+    for i in xrange(nbatches):
+        # the first thing to do in each batch is to create a view
+        # of the list of all files to work on
+        start_files_view = i*batch_size
+        end_files_view   = (i+1)*batch_size
+        if end_files_view >= np.size(files_all):
+            files = files_all[start_files_view:]
+        else:
+            files = files_all[start_files_view:end_files_view]
+            # now files should be a list of size batch_size, which
+            # will be split into several chunks to work on with different
+            # processes
+            assert np.size(files) == batch_size
+
+        # Calculate the number of files each process has to work on in the
+        # current batch
+        nfiles = len(files)
+        chunksize   = int(np.floor(nfiles / float(settings.nprocs)))
+        print 'NUMBER OF FILES {0}; CHUNKSIZE {1}'.format( nfiles, chunksize)
+
+        for j in xrange(settings.nprocs):
+            # create a new process
+            print 'start process', j
+            #print 'each process', h.heap()
+            try:
+                interpolate_flag = True
+                p = mp.Process(target=spec_loop, 
+                               args=(files, 
+                                     settings, 
+                                     resid_corr, 
+                                     chunksize, 
+                                     chunksize*j, 
+                                     chunksize*(j+1),
+                                     i, # we put in i as an argument to differentiate the cPickle filenames
+                                        # for each batch
+                                     interpolate_flag))
+            except Exception as e:
+                print 'One worker ran into an error. {{0}}: {{1}}'.format(e.errno, e.strerror)
+                error = open('error.log', 'a')
+                print>>error, 'One worker ran into an error. {{0}}: {{1}}'.format(e.errno, e.strerror)
+                import sys
+                sys.exit()
+                #raise
+
+            #print 'after each process', h.heap()
+            # add it to the list of processes
+            procs.append(p)
+            # start the process
+            p.start()
+
+        for p in procs:
+            p.join()
+
+
+    end_time = timeit.default_timer()
+
+    hour,min,sec = get_time()
+    print 'Program took {0:3d}h:{1:02d}m:{2:02d}s to run.'.format(hour,min,sec)
+
+    
+if __name__ == "__main__":
+    import sys
+    main(sys.argv[1:])
